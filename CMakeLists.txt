@@ -16,3 +16,7 @@ target_include_directories(${PROJECT_NAME}
 PUBLIC 
     "Headers"
 )
+
+if (${CMAKE_BUILD_TYPE} MATCHES "Debug")
+    add_definitions(-D_DEBUG)
+endif()
