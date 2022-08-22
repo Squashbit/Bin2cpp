@@ -1,6 +1,25 @@
 #include <iostream>
 #include <fstream>
 #include <charconv>
+#include <functional>
+#include <algorithm>
+
+#define NEXT_ARG_VARIABLE(argName, detailVariable) \
+	if (!strcmp(arg, argName)) { \
+		if (argc < i + 2) { \
+			PrintHelp(); \
+			return false; \
+		} \
+		\
+		pDetails->detailVariable = nextArg; \
+	}
+
+enum class HeaderGuard
+{
+	NONE = 0,
+	PRAGMA = 1,
+	IFNDEF = 2,
+};
 
 struct CppDetails
 {
@@ -8,6 +27,11 @@ struct CppDetails
 	std::string sourceFilepath;
 	// The path to export the content to.
 	std::string outputFilepath;
+	std::string dataNamespace;
+	std::string constantName;
+	std::string headerGuardName;
+
+	HeaderGuard guardMode = HeaderGuard::NONE;
 };
 
 void PrintHelp()
@@ -17,9 +41,10 @@ void PrintHelp()
 	std::cout << "-o <path> : Sets the output file\n";
 	std::cout << "-n <namespace> : Sets the namespace of the constant. "
 		<< "If this argument is not present, no namespace is set and the constant is a global variable.\n";
-	std::cout << "-p : If this argument is set, a #pragma once will be inserted at the top of the file\n";
-	std::cout << "-h : If this argument is set, header protection will be set at the top of the file.\n";
 	std::cout << "-c <name> : Sets the name of the constant.\n";
+	std::cout << "-h <name> : Sets the name of the header guard. -gh must be set for this to work.\n";
+	std::cout << "-gp : If this argument is set, a #pragma once will be inserted at the top of the file\n";
+	std::cout << "-gh : If this argument is set, header protection will be set at the top of the file.\n";
 
 	std::cout << std::flush;
 }
@@ -30,33 +55,48 @@ bool ProcessArguments(uint32_t argc, char* argv[], CppDetails*const pDetails)
 	// Go through every argument
 	for (uint32_t i = 1; i < argc; i++)
 	{
-		if (!strcmp(argv[i], "-s"))
-		{
-			// + 2 because one is for the index conversion to size
-			// and another to make sure that the user has specified
-			// another argument.
-			if (argc < i + 2)
-			{
-				PrintHelp();
-				return false;
-			}
+		char* arg = argv[i];
+		char* nextArg = argv[i + 1];
 
-			pDetails->sourceFilepath = argv[i + 1];
-		}
+		NEXT_ARG_VARIABLE("-s", sourceFilepath);
+		NEXT_ARG_VARIABLE("-o", outputFilepath);
+		NEXT_ARG_VARIABLE("-n", dataNamespace);
+		NEXT_ARG_VARIABLE("-c", constantName);
+		NEXT_ARG_VARIABLE("-h", headerGuardName);
 
-		if (!strcmp(argv[i], "-o"))
-		{
-			if (argc < i + 2)
-			{
-				PrintHelp();
-				return false;
-			}
+		if (!strcmp(arg, "-gp"))
+			pDetails->guardMode = HeaderGuard::PRAGMA;
 
-			pDetails->outputFilepath = argv[i + 1];
-		}
+		if (!strcmp(arg, "-gh"))
+			pDetails->guardMode = HeaderGuard::IFNDEF;
 	}
 
 	return true;
+}
+
+std::string FilenameToSnakeCase(std::string str)
+{
+	// Find only the filename of the path
+	std::string filename = str.substr(str.find_last_of("/\\") + 1);
+	// Then find only the name without the extension
+	std::string fileNoExtension = filename.substr(0, filename.find_last_of("."));
+	// Then remove special characters
+	std::string fileNoSpecial = fileNoExtension;
+	{
+		std::string special = "`~!@#$%^&**()[]{}\\|;:\'\",<.>/?-_=+";
+
+		for (uint32_t i = 0; i < special.size(); i++)
+			fileNoSpecial.erase(std::remove(fileNoSpecial.begin(),
+				fileNoSpecial.end(), special[i]), fileNoSpecial.end());
+	}
+
+	// THEN replace spaces with underscores
+	std::string fileNoSpaces = fileNoSpecial;
+	for (uint32_t i = 0; i < fileNoSpaces.size(); i++)
+		if (fileNoSpaces[i] == ' ')
+			fileNoSpaces[i] = '_';
+
+	return fileNoSpaces;
 }
 
 int main(uint32_t argc, char* argv[])
@@ -90,7 +130,69 @@ int main(uint32_t argc, char* argv[])
 	}
 
 	std::string output;
-	output += "const unsigned char thing[] = {\n\t";
+
+	// Header guard
+	switch (details.guardMode)
+	{
+		case HeaderGuard::NONE: break;
+		case HeaderGuard::PRAGMA: output += "#pragma once\n\n"; break;
+		case HeaderGuard::IFNDEF: 
+		{
+			std::string headerGuardName = "_";
+			if (details.headerGuardName.size() == 0)
+			{
+				// If the user did not define a custom header guard name,
+				// then use the output filename to create one.
+
+				std::string snakeCase = FilenameToSnakeCase(details.outputFilepath);
+
+				// Capitalize the string
+				for (uint32_t i = 0; i < snakeCase.size(); i++)
+					snakeCase[i] = std::toupper(snakeCase[i]);
+
+				// Now add it to the header guard name
+				headerGuardName += snakeCase;
+			}
+			else
+				headerGuardName = details.headerGuardName;
+
+			output += "#ifndef ";
+			output += headerGuardName;
+			output += "\n#define ";
+			output += headerGuardName;
+			output += "\n\n";
+		}
+		break;
+	}
+
+	if (details.dataNamespace.size() > 0)
+		output += "namespace " + details.dataNamespace + "\n{\n";
+
+	// Constant name
+	{
+		std::string constantName;
+		if (details.constantName.size() == 0)
+		{
+			// Making the constant name is fairly similar to the header guard,
+			// so use the same function.
+
+			std::string snakeCase = FilenameToSnakeCase(details.sourceFilepath);
+
+			// Except make it lowercase
+			for (uint32_t i = 0; i < snakeCase.size(); i++)
+				snakeCase[i] = std::tolower(snakeCase[i]);
+
+			constantName = "_binary_" + snakeCase;
+		}
+		else
+			constantName = details.constantName;
+
+		if (details.dataNamespace.size() > 0)
+			output += "\t";
+
+		output += "const unsigned char " + constantName + "[] = {\n";
+	}
+	
 	{
 		// Read every character of the file one by one and stop when EOF or end of file.
 
@@ -115,7 +217,7 @@ int main(uint32_t argc, char* argv[])
 				output += ',';
 
 				if ((i + 1) % 24 == 0)
-					output += "\n\t";
+					output += "\n";
 			}
 
 			// Handle the last character differently. Don't add a comma.
@@ -131,7 +233,17 @@ int main(uint32_t argc, char* argv[])
 			delete[] data;
 		}
 	}
-	output += "\n};\n";
+
+	output += "\n";
+	if (details.dataNamespace.size() > 0)
+		output += "\t";
+	output += "};\n";
+
+	if (details.dataNamespace.size() > 0)
+		output += "}";
+
+	if (details.guardMode == HeaderGuard::IFNDEF)
+		output += "\n#endif\n";
 
 	// Write the output to the output file.
 	outputFile << output;
