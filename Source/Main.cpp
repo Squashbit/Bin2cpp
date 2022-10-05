@@ -1,4 +1,5 @@
 #include <iostream>
+#include <cstring>
 #include <fstream>
 #include <charconv>
 #include <functional>
@@ -99,7 +100,7 @@ std::string FilenameToSnakeCase(std::string str)
 	return fileNoSpaces;
 }
 
-int main(uint32_t argc, char* argv[])
+int main(int argc, char* argv[])
 {
 	// Check if the command has any arguments.
 
