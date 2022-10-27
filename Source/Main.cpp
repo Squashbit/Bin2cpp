@@ -34,7 +34,7 @@ struct CppDetails
 	std::string dataNamespace;
 	std::string constantName;
 	std::string headerGuardName;
-	bool makeDirectory = false;
+	bool makeOutputDirectory = false;
 
 	HeaderGuard guardMode = HeaderGuard::NONE;
 };
@@ -71,7 +71,7 @@ bool ProcessArguments(uint32_t argc, char* argv[], CppDetails*const pDetails)
 		NEXT_ARG_VARIABLE("-c", constantName);
 		NEXT_ARG_VARIABLE("-h", headerGuardName);
 
-		if (!strcmp(arg, "-mkd")) pDetails->makeDirectory = true; continue;
+		if (!strcmp(arg, "-mkd")) pDetails->makeOutputDirectory = true; continue;
 		if (!strcmp(arg, "-gp")) pDetails->guardMode = HeaderGuard::PRAGMA; continue;
 		if (!strcmp(arg, "-gh")) pDetails->guardMode = HeaderGuard::IFNDEF; continue;
 	}
@@ -97,25 +97,27 @@ struct PathInfo
 	char driveLetter = NULL;
 };
 
-void ParsePath(PathInfo* pInfo, const std::string& path)
+size_t TrimWindowsDriveLetter(PathInfo* pInfo)
 {
-	pInfo->fullPath = path;
-
-	// Trim drive letter if it exists
-	size_t startIndex = 0;
-	if (path.size() >= 3)
+	size_t readStartIndex = 0;
+	if (pInfo->fullPath.size() >= 3)
 	{
-		if (path[1] == ':')
+		if (pInfo->fullPath[1] == ':')
 		{
-			startIndex = 3;
-			pInfo->driveLetter = path[0];
+			readStartIndex = 3;
+			pInfo->driveLetter = pInfo->fullPath[0];
 		}
 	}
 
-	size_t lastSplitIndex = startIndex;
-	for (size_t i = startIndex; i < path.size(); i++)
+	return readStartIndex;
+}
+
+size_t SplitPathBySlashes(PathInfo* pInfo, size_t driveEndIndex)
+{
+	size_t lastSplitIndex = driveEndIndex;
+	for (size_t i = driveEndIndex; i < pInfo->fullPath.size(); i++)
 	{
-		if (path[i] == '/' || path[i] == '\\')
+		if (pInfo->fullPath[i] == '/' || pInfo->fullPath[i] == '\\')
 		{
 			if (i - lastSplitIndex == 0)
 			{
@@ -126,26 +128,44 @@ void ParsePath(PathInfo* pInfo, const std::string& path)
 			}
 
 			// String with every character since the last split index
-			std::string part = path.substr(lastSplitIndex, i - lastSplitIndex);
+			std::string part = pInfo->fullPath.substr(lastSplitIndex, 
+				i - lastSplitIndex);
 
 			pInfo->splitPath.push_back(part);
 			lastSplitIndex = i + 1;
 		}
 	}
 
-	// Add last split
-	size_t charsSinceSplit = path.size() - lastSplitIndex;
+	// Split once more for filename
+	size_t charsSinceSplit = pInfo->fullPath.size() - lastSplitIndex;
 	if (charsSinceSplit != 0)
-		pInfo->splitPath.push_back(path.substr(lastSplitIndex, charsSinceSplit));
+		pInfo->splitPath.push_back(pInfo->fullPath.substr(lastSplitIndex, 
+			charsSinceSplit));
 
+	return lastSplitIndex;
+}
+
+void ParsePath(PathInfo* pInfo, const std::string& path)
+{
+	pInfo->fullPath = path;
+
+	// If the path doesn't have a drive letter in it, 
+	// this will just be 0 (the start of the string).
+	size_t driveLetterEndIndex = TrimWindowsDriveLetter(pInfo);
+
+	size_t filenameStartIndex = SplitPathBySlashes(pInfo, driveLetterEndIndex);
+
+	// Add every split except the last. The directories vector includes all
+	// directories, but NOT the filename.
 	for (size_t i = 0; i < pInfo->splitPath.size() - 1; i++)
 		pInfo->directories.push_back(pInfo->splitPath[i]);
 
 	if (pInfo->splitPath.size() > 0)
 		pInfo->fullFilename = pInfo->splitPath[pInfo->splitPath.size() - 1];
 
-	pInfo->pathNoDrive = path.substr(startIndex, path.size() - startIndex);
-	pInfo->pathNoFilename = path.substr(0, lastSplitIndex);
+	pInfo->pathNoDrive = path.substr(driveLetterEndIndex, 
+		path.size() - driveLetterEndIndex);
+	pInfo->pathNoFilename = path.substr(0, filenameStartIndex);
 }
 
 std::string FilenameToSnakeCase(std::string str)
@@ -153,7 +173,6 @@ std::string FilenameToSnakeCase(std::string str)
 	PathInfo info;
 	ParsePath(&info, str);
 
-	// Then remove special characters
 	std::string fileNoSpecial = info.fullFilename;
 	{
 		std::string special = "`~!@#$%^&**()[]{}\\|;:\'\",<>/?-_=+";
@@ -178,56 +197,13 @@ std::string FilenameToSnakeCase(std::string str)
 	return fileNoDots;
 }
 
-int main(int argc, char* argv[])
+void AddHeaderGuard(CppDetails& details, std::string& output)
 {
-	// Check if the command has any arguments.
-
-	if (argc < 2)
-	{
-		PrintHelp();
-		return EXIT_FAILURE;
-	}
-
-	CppDetails details;
-	if (!ProcessArguments(argc, argv, &details))
-		return EXIT_FAILURE;
-
-	// The program must have a source and output filepath, 
-	// so if the user didn't provide those, exit the program.
-
-	std::ifstream sourceFile(details.sourceFilepath, std::ios::binary | std::ios::ate);
-
-	// Checks if the source file exists
-	if (!sourceFile.is_open())
-	{
-		std::cout << "Source file doesn't exist or access is denied.\n\n";
-
-		sourceFile.close();
-		
-		PrintHelp();
-		return EXIT_FAILURE;
-	}
-
-	// Make the directory after the input file is known to exist
-	if (details.makeDirectory)
-	{
-		PathInfo info;
-		ParsePath(&info, details.outputFilepath);
-
-		std::filesystem::create_directory(info.pathNoFilename);
-	}
-
-	// Open the output file as an ofstream instead of ifstream
-	std::ofstream outputFile(details.outputFilepath);
-
-	std::string output;
-
-	// Header guard
 	switch (details.guardMode)
 	{
 		case HeaderGuard::NONE: break;
 		case HeaderGuard::PRAGMA: output += "#pragma once\n\n"; break;
-		case HeaderGuard::IFNDEF: 
+		case HeaderGuard::IFNDEF:
 		{
 			std::string headerGuardName = "_";
 			if (details.headerGuardName.size() == 0)
@@ -255,75 +231,135 @@ int main(int argc, char* argv[])
 		}
 		break;
 	}
+}
 
+void AddNamespace(CppDetails& details, std::string& output)
+{
 	if (details.dataNamespace.size() > 0)
 		output += "namespace " + details.dataNamespace + "\n{\n";
+}
 
-	// Constant name
+void AddConstantName(CppDetails& details, std::string& output)
+{
+	std::string constantName;
+	if (details.constantName.size() == 0)
 	{
-		std::string constantName;
-		if (details.constantName.size() == 0)
+		// Making the constant name is fairly similar to the header guard,
+		// so use the same function.
+
+		std::string snakeCase = FilenameToSnakeCase(details.sourceFilepath);
+
+		// Except make it lowercase
+		for (uint32_t i = 0; i < snakeCase.size(); i++)
+			snakeCase[i] = std::tolower(snakeCase[i]);
+
+		constantName = "_binary_" + snakeCase;
+	}
+	else
+		constantName = details.constantName;
+
+	if (details.dataNamespace.size() > 0)
+		output += "\t";
+
+	output += "const unsigned char " + constantName + "[] = {\n";
+}
+
+std::string ReadFileAsNumbers(std::ifstream& sourceFile)
+{
+	std::string numbers;
+
+	uint64_t size = sourceFile.tellg();
+	if (size > 0)
+	{
+		uint8_t* data = new uint8_t[size];
+
+		// Seek to the beginning of the file and read all data
+		sourceFile.seekg(0, std::ios::beg);
+		sourceFile.read((char*)data, size);
+
+		// Loop through all file data
+		for (uint64_t i = 0; i < size - 1; i++)
 		{
-			// Making the constant name is fairly similar to the header guard,
-			// so use the same function.
+			uint8_t byte = data[i];
 
-			std::string snakeCase = FilenameToSnakeCase(details.sourceFilepath);
+			char num[4] = {};
+			std::to_chars(num, num + 3, byte);
 
-			// Except make it lowercase
-			for (uint32_t i = 0; i < snakeCase.size(); i++)
-				snakeCase[i] = std::tolower(snakeCase[i]);
+			numbers += num;
+			numbers += ',';
 
-			constantName = "_binary_" + snakeCase;
+			if ((i + 1) % 24 == 0)
+				numbers += "\n";
 		}
-		else
-			constantName = details.constantName;
 
-		if (details.dataNamespace.size() > 0)
-			output += "\t";
+		// Handle the last character differently. Don't add a comma.
+		{
+			uint8_t byte = data[size - 1];
 
-		output += "const unsigned char " + constantName + "[] = {\n";
+			char num[4] = {};
+			std::to_chars(num, num + 3, byte);
+
+			numbers += num;
+		}
+
+		delete[] data;
+	}
+
+	return numbers;
+}
+
+int main(int argc, char* argv[])
+{
+	// Check if the command has any arguments other than the call to the executable.
+	if (argc < 2)
+	{
+		PrintHelp();
+		return EXIT_FAILURE;
+	}
+
+	CppDetails details;
+	if (!ProcessArguments(argc, argv, &details))
+		return EXIT_FAILURE;
+
+	// The program must have a source and output filepath, 
+	// so if the user didn't provide those, exit the program.
+	if (details.sourceFilepath.size() == 0 || details.outputFilepath.size() == 0)
+	{
+		std::cout << "Provide a source file with -s and an output with -o.\n\n";
+
+		PrintHelp();
+		return EXIT_FAILURE;
+	}
+
+	std::ifstream sourceFile(details.sourceFilepath, std::ios::binary | std::ios::ate);
+
+	if (!sourceFile.is_open())
+	{
+		std::cout << "Source file doesn't exist or access is denied.\n\n";
+
+		sourceFile.close();
+		
+		PrintHelp();
+		return EXIT_FAILURE;
 	}
 	
+	if (details.makeOutputDirectory)
 	{
-		// Read every character of the file one by one and stop when EOF or end of file.
+		PathInfo info;
+		ParsePath(&info, details.outputFilepath);
 
-		uint64_t size = sourceFile.tellg();
-		if (size > 0)
-		{
-			uint8_t* data = new uint8_t[size];
-
-			// Seek to the beginning of the file and read all data
-			sourceFile.seekg(0, std::ios::beg);
-			sourceFile.read((char*)data, size);
-
-			// Loop through all file data
-			for (uint64_t i = 0; i < size - 1; i++)
-			{
-				uint8_t byte = data[i];
-
-				char num[4] = {};
-				std::to_chars(num, num + 3, byte);
-
-				output += num;
-				output += ',';
-
-				if ((i + 1) % 24 == 0)
-					output += "\n";
-			}
-
-			// Handle the last character differently. Don't add a comma.
-			{
-				uint8_t byte = data[size - 1];
-
-				char num[4] = {};
-				std::to_chars(num, num + 3, byte);
-
-				output += num;
-			}
-			
-			delete[] data;
-		}
+		std::filesystem::create_directory(info.pathNoFilename);
 	}
+
+	// Open the output file as an ofstream instead of ifstream
+	std::ofstream outputFile(details.outputFilepath);
+
+	std::string output;
+	AddHeaderGuard(details, output);
+	AddNamespace(details, output);
+	AddConstantName(details, output);
+
+	output += ReadFileAsNumbers(sourceFile);
 
 	output += "\n";
 	if (details.dataNamespace.size() > 0)
